@@ -97,4 +97,192 @@ resource "google_compute_firewall" "allow-ssh-ingress-from-iap" {
     }
 }
 
+resource "google_compute_instance_template" "backend_template" {
+  name         = "backend_instance"
+  machine_type = "f1-micro"
+
+  disk {
+    source_image = "debian-cloud/debian-10"
+    auto_delete  = true
+    boot         = true
+    disk_size_gb = "10"
+  }
+
+  network_interface {
+    network = "vpc_zakharov"
+    subnetwork = "subnetwork-2"
+  }
+
+  tags = ["allow-ssh", "allow-lb-health"]
+
+  metadata_startup_script = file("start.sh")
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "google_compute_instance_group_manager" "backend_mig" {
+  name               = "backend"
+  base_instance_name = "mini-arsenii"
+  zone               = ["europe-west1-b", "europe-west1-c"]
+  target_size        = "2"
+  version {
+    instance_template  = google_compute_instance_template.backend_template
+  }
+}
+
+resource "google_compute_autoscaler" "scaler_arsenii" {
+  name   = "autoscaler"
+  zone   = "europe-west1-b"
+  target = google_compute_instance_group_manager.backend_mig
+
+  autoscaling_policy {
+    max_replicas    = 5
+    min_replicas    = 2
+    cpu_utilization {
+      target = 0.7
+    }
+  }
+}
+
+resource "google_compute_health_check" "tcp-health-check" {
+  name = "tcp-health-check"
+
+  timeout_sec        = 1
+  check_interval_sec = 1
+
+  tcp_health_check {
+    port = "80"
+  }
+}
+
+resource "google_compute_backend_service" "backend-bs" {
+  name                  = "backend-service"
+  protocol              = "tcp"
+  load_balancing_scheme = "INTERNAL"
+  network               = "vpc_zakharov"
+  health_checks = [google_compute_health_check.tcp-health-check.id]
+}
+
+resource "google_compute_backend_service" "add-backend-bs" {
+  name = "add-instances"
+  backend {
+    group = google_compute_backend_service.backend-bs
+  }
+}
+
+resource "google_compute_forwarding_rule" "backend-lb" {
+  name = "backend-lb"
+  ports = ["80"]
+  backend_service = "backend-bs"
+  load_balancing_scheme = "INTERNAL"
+  network = "vpc_zakharov"
+  subnetwork = "subnetwork-2"
+  ip_protocol = "tcp"
+}
+
+resource "google_compute_instance_template" "frontend_template" {
+  name         = "frontend_instance"
+  machine_type = "f1-micro"
+
+  disk {
+    source_image = "centos-cloud/centos-7"
+    auto_delete  = true
+    boot         = true
+    disk_size_gb = "20"
+  }
+
+  network_interface {
+    network = "vpc_zakharov"
+    subnetwork = "subnetwork-1"
+  }
+
+  tags = ["allow-ssh" ,"allow-healthcheck" ,"allow-http"]
+
+  metadata_startup_script = file("startfront.sh")
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "google_compute_instance_group_manager" "frontend_mig" {
+  name               = "frontend"
+  base_instance_name = "mini-arsenii-2"
+  zone               = ["europe-west1-b", "europe-west1-c"]
+  target_size        = "2"
+  named_port {
+    name = "http"
+    port = 80
+  }
+  version {
+    instance_template  = google_compute_instance_template.frontend_template
+  }
+}
+
+resource "google_compute_autoscaler" "scaler_arsenii_front" {
+  name   = "autoscaler_front"
+  zone   = "europe-west1-b"
+  target = google_compute_instance_group_manager.frontend_mig
+
+  autoscaling_policy {
+    max_replicas    = 5
+    min_replicas    = 2
+    cpu_utilization {
+      target = 0.7
+    }
+  }
+}
+
+resource "google_compute_health_check" "http-check-front" {
+  name = "tcp-health-check-front"
+
+  timeout_sec        = 1
+  check_interval_sec = 1
+
+  tcp_health_check {
+    port = "80"
+  }
+}
+
+resource "google_compute_backend_service" "frontend-bs" {
+  name                  = "frontend-service"
+  protocol              = "HTTP"
+  port_name             = "http"
+  load_balancing_scheme = "INTERNAL"
+  network               = "vpc_zakharov"
+  health_checks = [google_compute_health_check.http-check-front.id]
+}
+
+resource "google_compute_backend_service" "add-frontend-bs" {
+  name = "add-frontend-bs"
+  backend {
+    group = "google_compute_instance_group_manager.frontend_mig"
+  }
+}
+resource "google_compute_url_map" "urlmap" {
+  name            = "urlmap"
+  default_service = google_compute_backend_service.frontend-bs.id
+  path_matcher {
+    name            = "pathmap"
+    default_service = google_compute_backend_service.frontend-bs.id
+    path_rule {
+      paths = ["/*=frontend-bs"]
+    }
+  }
+}
+
+resource "google_compute_target_https_proxy" "default" {
+  name             = "proxy"
+  url_map          = google_compute_url_map.urlmap
+  ssl_certificates = [google_compute_target_https_proxy.default]
+}
+
+
+
+
+
+
+
 
